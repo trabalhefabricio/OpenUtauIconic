@@ -42,53 +42,111 @@ namespace OpenUtau.Classic {
             this.basePath = basePath;
         }
 
+        /// <summary>
+        /// Searches for all voicebanks with improved error handling.
+        /// </summary>
         public IEnumerable<Voicebank> SearchAll() {
             List<Voicebank> result = new List<Voicebank>();
+            
             if (!Directory.Exists(basePath)) {
+                Log.Warning($"Voicebank search path does not exist: {basePath}");
                 return result;
             }
+
             IEnumerable<string> files;
-            if (Preferences.Default.LoadDeepFolderSinger) {
-                files = Directory.EnumerateFiles(basePath, kCharTxt, SearchOption.AllDirectories);
-            } else {
-                // TopDirectoryOnly
-                files = Directory.GetDirectories(basePath)
-                    .SelectMany(path => Directory.EnumerateFiles(path, kCharTxt));
+            try {
+                if (Preferences.Default.LoadDeepFolderSinger) {
+                    files = Directory.EnumerateFiles(basePath, kCharTxt, SearchOption.AllDirectories);
+                } else {
+                    // TopDirectoryOnly
+                    files = Directory.GetDirectories(basePath)
+                        .SelectMany(path => {
+                            try {
+                                return Directory.EnumerateFiles(path, kCharTxt);
+                            } catch (Exception e) {
+                                Log.Warning(e, $"Failed to enumerate files in {path}");
+                                return Enumerable.Empty<string>();
+                            }
+                        });
+                }
+            } catch (Exception e) {
+                Log.Error(e, $"Failed to enumerate voicebank files in {basePath}");
+                return result;
             }
-            result.AddRange(files
-                .Select(filePath => {
-                    try {
-                        var voicebank = new Voicebank();
-                        LoadInfo(voicebank, filePath, basePath);
-                        return voicebank;
-                    } catch (Exception e) {
-                        Log.Error(e, $"Failed to load {filePath} info.");
-                        return null;
-                    }
-                })
-                .OfType<Voicebank>());
+
+            int loadedCount = 0;
+            int failedCount = 0;
+
+            foreach (var filePath in files) {
+                try {
+                    var voicebank = new Voicebank();
+                    LoadInfo(voicebank, filePath, basePath);
+                    result.Add(voicebank);
+                    loadedCount++;
+                } catch (Exception e) {
+                    Log.Warning(e, $"Failed to load voicebank at {filePath}");
+                    failedCount++;
+                }
+            }
+
+            Log.Information($"Voicebank search in {basePath}: {loadedCount} loaded, {failedCount} failed");
             return result;
         }
 
+        /// <summary>
+        /// Loads complete voicebank data including oto sets.
+        /// </summary>
         public static void LoadVoicebank(Voicebank voicebank) {
-            LoadInfo(voicebank, voicebank.File, voicebank.BasePath);
-            LoadSubbanks(voicebank);
-            LoadOtoSets(voicebank, Path.GetDirectoryName(voicebank.File));
+            if (voicebank == null) {
+                throw new ArgumentNullException(nameof(voicebank));
+            }
+
+            if (string.IsNullOrWhiteSpace(voicebank.File)) {
+                throw new InvalidOperationException("Voicebank file path is not set");
+            }
+
+            try {
+                LoadInfo(voicebank, voicebank.File, voicebank.BasePath);
+                LoadSubbanks(voicebank);
+                LoadOtoSets(voicebank, Path.GetDirectoryName(voicebank.File));
+                
+                Log.Information($"Loaded voicebank '{voicebank.Name}' with {voicebank.TotalOtoCount} oto(s)");
+            } catch (Exception e) {
+                Log.Error(e, $"Failed to load voicebank from {voicebank.File}");
+                throw;
+            }
         }
 
+        /// <summary>
+        /// Loads voicebank info from character.txt with better validation.
+        /// </summary>
         public static void LoadInfo(Voicebank voicebank, string filePath, string basePath) {
+            if (voicebank == null) {
+                throw new ArgumentNullException(nameof(voicebank));
+            }
+
+            if (string.IsNullOrWhiteSpace(filePath)) {
+                throw new ArgumentException("File path cannot be empty", nameof(filePath));
+            }
+
+            if (!File.Exists(filePath)) {
+                throw new FileNotFoundException($"Character file not found: {filePath}");
+            }
+
             var dir = Path.GetDirectoryName(filePath);
             var yamlFile = Path.Combine(dir, kCharYaml);
             VoicebankConfig? bankConfig = null;
+            
             if (File.Exists(yamlFile)) {
                 try {
                     using (var stream = File.OpenRead(yamlFile)) {
                         bankConfig = VoicebankConfig.Load(stream);
                     }
                 } catch (Exception e) {
-                    Log.Error(e, $"Failed to load yaml {yamlFile}");
+                    Log.Warning(e, $"Failed to load yaml config from {yamlFile}");
                 }
             }
+
             string singerType = bankConfig?.SingerType ?? string.Empty;
             if (SingerTypeUtils.SingerTypeFromName.ContainsKey(singerType)) {
                 voicebank.SingerType = SingerTypeUtils.SingerTypeFromName[singerType];
